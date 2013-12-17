@@ -3,7 +3,7 @@ version:             1.0.0
 synopsis:            Socket.io compatible Snaplet
 -- description:         
 homepage:            http://github.com/ocharles/snaplet-socketio
-license:             MIT
+license:             BSD3
 license-file:        LICENSE
 author:              Oliver Charles
 maintainer:          ollie@ocharles.org.uk
