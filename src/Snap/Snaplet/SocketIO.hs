@@ -13,6 +13,7 @@ module Snap.Snaplet.SocketIO
 
 import Prelude hiding (init)
 
+import Data.Char (intToDigit)
 import Blaze.ByteString.Builder (Builder, toLazyByteString)
 import Control.Applicative
 import Control.Eff ((:>))
@@ -22,20 +23,22 @@ import Control.Monad.Reader (asks)
 import Control.Monad.Trans.Writer (WriterT)
 import Data.Aeson ((.=), (.:))
 import Data.Foldable (asum)
+import Data.Traversable (forM)
 import Data.HashMap.Strict (HashMap)
 import Data.Monoid ((<>), mempty)
 import Data.Text (Text)
 import Data.Typeable (Typeable)
 
-import qualified Data.Attoparsec.Lazy as Attoparsec
 import qualified Blaze.ByteString.Builder as Builder
 import qualified Blaze.ByteString.Builder.ByteString as Builder
 import qualified Blaze.ByteString.Builder.Char8 as Builder
 import qualified Control.Eff as Effect
 import qualified Control.Eff.Lift as Effect
-import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types as Aeson
+import qualified Data.Attoparsec.Char8 as AttoparsecC8
+import qualified Data.Attoparsec.Lazy as Attoparsec
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.HashMap.Strict as HashMap
 import qualified Network.WebSockets as WS
 import qualified Network.WebSockets.Snap as WS
@@ -46,7 +49,7 @@ import qualified Snap.Snaplet as Snap
 --------------------------------------------------------------------------------
 data SocketIO = SocketIO
   { eventRouter :: HashMap Text Subscriber
-  , onConnection :: WS.Connection -> IO ()
+  , onConnection :: WS.Connection -> [WS.Connection] -> IO ()
   }
 
 
@@ -61,7 +64,7 @@ init router = Snap.makeSnaplet "socketio" "SocketIO" Nothing $ do
 
   SocketIO
     <$> liftIO (Effect.runLift (noopEmit subscribed))
-    <*> pure (\c -> Effect.runLift (runEmitter c (void subscribed)))
+    <*> pure (\c cs -> Effect.runLift (runEmitter c cs (void subscribed)))
 
 
 --------------------------------------------------------------------------------
@@ -77,7 +80,9 @@ data Message
   | Noop
 
 encodeMessage :: Message -> Builder
+decodeMessage :: LBS.ByteString -> Maybe Message
 
+--------------------------------------------------------------------------------
 encodeMessage (Event name args) =
   let prefix = Builder.fromString "5:::"
       event = Aeson.object [ "name" .= name
@@ -88,16 +93,25 @@ encodeMessage (Event name args) =
 encodeMessage Connect =
   Builder.fromString "1:::"
 
-decodeMessage :: LBS.ByteString -> Maybe Message
+
+--------------------------------------------------------------------------------
 decodeMessage = Attoparsec.maybeResult . Attoparsec.parse messageParser
  where
   messageParser = asum
     [ do let eventFromJson = Aeson.withObject "Event" $ \o ->
                Event <$> o .: "name" <*> o .: "args"
          Just event <- Aeson.parseMaybe eventFromJson
-                         <$> (Attoparsec.string "5:::" >> Aeson.json)
+                         <$> (prefixParser 5 >> Aeson.json)
          return event
     ]
+
+  prefixParser n = do
+    AttoparsecC8.char (intToDigit n)
+    AttoparsecC8.char ':'
+    Attoparsec.option () (void $ Attoparsec.many1 AttoparsecC8.digit)
+    Attoparsec.option Nothing (Just <$> AttoparsecC8.char '+')
+    AttoparsecC8.char ':'
+    AttoparsecC8.char ':'
 
 --------------------------------------------------------------------------------
 handShake :: Snap.Handler b SocketIO ()
@@ -116,7 +130,7 @@ webSocketHandler = accessControl $ do
     WS.sendTextData c . Builder.toLazyByteString $
       encodeMessage $ Connect
 
-    connectionHandler c
+    connectionHandler c []
 
     forever $ do
       m <- WS.receiveDataMessage c
@@ -128,7 +142,7 @@ webSocketHandler = accessControl $ do
         Event name args ->
           maybe
             (return ())
-            (\action -> Effect.runLift $ runEmitter c $ action args)
+            (\action -> Effect.runLift $ runEmitter c [] $ action args)
             (HashMap.lookup name router)
 
 
@@ -151,15 +165,17 @@ emitValues event values =
 
 runEmitter
   :: Effect.SetMember Effect.Lift (Effect.Lift IO) r
-  => WS.Connection -> Effect.Eff (Emit :> r) a -> Effect.Eff r a
-runEmitter c = loop . Effect.admin
+  => WS.Connection -> [WS.Connection] -> Effect.Eff (Emit :> r) a -> Effect.Eff r a
+runEmitter c pool = loop . Effect.admin
  where
   loop (Effect.Val x) = return x
-  loop (Effect.E u) = Effect.handleRelay u loop $
-    \(Emit event args k) -> do
-      Effect.lift . WS.sendTextData c . Builder.toLazyByteString $
-        encodeMessage $ Event event args
-      loop k
+  loop (Effect.E u) = Effect.handleRelay u loop $ \eff ->
+    case eff of
+      Emit event args k -> do
+        Effect.lift . WS.sendTextData c . Builder.toLazyByteString $
+          encodeMessage $ Event event args
+
+        loop k
 
 noopEmit :: Effect.Eff (Emit :> r) a -> Effect.Eff r a
 noopEmit = loop . Effect.admin
