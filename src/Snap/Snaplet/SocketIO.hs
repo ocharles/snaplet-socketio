@@ -148,8 +148,10 @@ webSocketHandler = accessControl $ do
 
 --------------------------------------------------------------------------------
 accessControl :: Snap.MonadSnap m => m a -> m a
-accessControl =
-  (Snap.modifyResponse (Snap.setHeader "Access-Control-Allow-Origin" "*") >>)
+accessControl m = do
+  Snap.modifyResponse (Snap.setHeader "Access-Control-Allow-Origin" "http://localhost:3000")
+  Snap.modifyResponse (Snap.setHeader "Access-Control-Allow-Credentials" "true")
+  m
 
 
 --------------------------------------------------------------------------------
