@@ -156,6 +156,7 @@ accessControl m = do
 
 --------------------------------------------------------------------------------
 data Emit k = Emit Text [Aeson.Value] k
+            | Broadcast Text [Aeson.Value] k
   deriving (Functor, Typeable)
 
 emit :: (Effect.Member Emit r, Aeson.ToJSON a) => Text -> a -> Effect.Eff r ()
@@ -164,6 +165,13 @@ emit event value = emitValues event [ Aeson.toJSON value ]
 emitValues :: (Effect.Member Emit r) => Text -> [Aeson.Value] -> Effect.Eff r ()
 emitValues event values =
   Effect.send $ \k -> Effect.inj $ Emit event values (k ())
+
+broadcast :: (Effect.Member Emit r, Aeson.ToJSON a) => Text -> a -> Effect.Eff r ()
+broadcast event value = broadcastValues event [ Aeson.toJSON value ]
+
+broadcastValues :: (Effect.Member Emit r) => Text -> [Aeson.Value] -> Effect.Eff r ()
+broadcastValues event values =
+  Effect.send $ \k -> Effect.inj $ Broadcast event values (k ())
 
 runEmitter
   :: Effect.SetMember Effect.Lift (Effect.Lift IO) r
@@ -178,6 +186,14 @@ runEmitter c pool = loop . Effect.admin
           encodeMessage $ Event event args
 
         loop k
+
+      Broadcast event args k -> do
+        forM pool $ \c' ->
+          Effect.lift . WS.sendTextData c' . Builder.toLazyByteString $
+            encodeMessage $ Event event args
+
+        loop k
+
 
 noopEmit :: Effect.Eff (Emit :> r) a -> Effect.Eff r a
 noopEmit = loop . Effect.admin
