@@ -6,7 +6,7 @@
 module Snap.Snaplet.SocketIO
   ( SocketIO
   , init
-
+  , Listen
   , emit
   , on
   ) where
