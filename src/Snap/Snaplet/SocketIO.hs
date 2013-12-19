@@ -13,20 +13,21 @@ module Snap.Snaplet.SocketIO
 
 import Prelude hiding (init)
 
-import Data.Char (intToDigit)
 import Blaze.ByteString.Builder (Builder, toLazyByteString)
 import Control.Applicative
+import Control.Concurrent (forkIO, threadDelay)                   
 import Control.Eff ((:>))
 import Control.Monad (forever, void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (asks)
 import Control.Monad.Trans.Writer (WriterT)
 import Data.Aeson ((.=), (.:))
+import Data.Char (intToDigit)
 import Data.Foldable (asum)
-import Data.Traversable (forM)
 import Data.HashMap.Strict (HashMap)
 import Data.Monoid ((<>), mempty)
 import Data.Text (Text)
+import Data.Traversable (forM)
 import Data.Typeable (Typeable)
 
 import qualified Blaze.ByteString.Builder as Builder
@@ -40,6 +41,7 @@ import qualified Data.Attoparsec.Char8 as AttoparsecC8
 import qualified Data.Attoparsec.Lazy as Attoparsec
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.HashMap.Strict as HashMap
+import qualified Data.Text as Text                                        
 import qualified Network.WebSockets as WS
 import qualified Network.WebSockets.Snap as WS
 import qualified Snap as Snap
@@ -78,30 +80,37 @@ data Message
   | Ack
   | Error
   | Noop
+  deriving (Show)
 
 encodeMessage :: Message -> Builder
 decodeMessage :: LBS.ByteString -> Maybe Message
 
 --------------------------------------------------------------------------------
+encodeMessage Connect =
+  Builder.fromString "1:::"
+
+encodeMessage Heartbeat =
+  Builder.fromString "2:::"
+
 encodeMessage (Event name args) =
-  let prefix = Builder.fromString "5:::"
+  let prefix = Builder.fromString "5::"
       event = Aeson.object [ "name" .= name
                            , "args" .= args
                            ]
   in prefix <> Builder.fromLazyByteString (Aeson.encode event)
 
-encodeMessage Connect =
-  Builder.fromString "1:::"
 
 
 --------------------------------------------------------------------------------
 decodeMessage = Attoparsec.maybeResult . Attoparsec.parse messageParser
  where
   messageParser = asum
-    [ do let eventFromJson = Aeson.withObject "Event" $ \o ->
+    [ do Heartbeat <$ prefixParser 2
+
+    , do let eventFromJson = Aeson.withObject "Event" $ \o ->
                Event <$> o .: "name" <*> o .: "args"
          Just event <- Aeson.parseMaybe eventFromJson
-                         <$> (prefixParser 5 >> Aeson.json)
+                         <$> (prefixParser 5 >> AttoparsecC8.char ':' >> Aeson.json)
          return event
     ]
 
@@ -111,11 +120,15 @@ decodeMessage = Attoparsec.maybeResult . Attoparsec.parse messageParser
     Attoparsec.option () (void $ Attoparsec.many1 AttoparsecC8.digit)
     Attoparsec.option Nothing (Just <$> AttoparsecC8.char '+')
     AttoparsecC8.char ':'
-    AttoparsecC8.char ':'
 
 --------------------------------------------------------------------------------
 handShake :: Snap.Handler b SocketIO ()
-handShake = Snap.writeText "4d4f185e96a7b:15:10:websocket"
+handShake = Snap.writeText $ Text.intercalate ":"
+  [ "4d4f185e96a7b"
+  , Text.pack $ show heartbeatPeriod
+  , "10"
+  , ":websocket"
+  ]
 
 
 --------------------------------------------------------------------------------
@@ -127,18 +140,26 @@ webSocketHandler = do
   WS.runWebSocketsSnap $ \pendingConnection -> void $ do
     c <- WS.acceptRequest pendingConnection
 
-    WS.sendTextData c . Builder.toLazyByteString $
-      encodeMessage $ Connect
+    --WS.sendTextData c . Builder.toLazyByteString $
+    --1  encodeMessage $ Connect
 
     connectionHandler c []
+
+    forkIO $ forever $ do
+      -- TODO This is dumb. We should heartbeat once and *wait*
+      WS.sendTextData c . Builder.toLazyByteString $ encodeMessage Heartbeat
+      threadDelay (heartbeatPeriod * 1000000)
 
     forever $ do
       m <- WS.receiveDataMessage c
 
       Just message <- return $ case m of
-            WS.Text encodedText -> decodeMessage encodedText
+        WS.Text encodedText -> decodeMessage encodedText
 
       case message of
+        -- TODO Acknowledge this
+        Heartbeat -> return ()
+
         Event name args ->
           maybe
             (return ())
@@ -221,3 +242,8 @@ buildRoutingTable = loop HashMap.empty . Effect.admin
   loop t (Effect.E u) = Effect.handleRelay u (loop t) $
     \(Listen event subscriber k) ->
       loop (HashMap.insert event subscriber t) k
+
+
+--------------------------------------------------------------------------------
+heartbeatPeriod :: Int
+heartbeatPeriod = 15
