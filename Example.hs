@@ -12,6 +12,7 @@ import qualified Snap.Http.Server.Config as Snap
 import qualified Snap.Snaplet as Snap
 import qualified Snap.Snaplet.SocketIO as SocketIO
 import qualified Snap.Util.FileServe as Snap
+import qualified Snap.CORS as CORS
 
 data App = App { _socketIO :: Snap.Snaplet SocketIO.SocketIO }
 makeLenses ''App
@@ -20,6 +21,7 @@ initApp = Snap.makeSnaplet "app" "app" Nothing $ do
   Snap.addRoutes [ ("/socket.io.js", Snap.serveFile "node_modules/socket.io-client/dist/socket.io.js")
                  , ("/", Snap.serveFile "example.html")
                  ]
+  CORS.wrapCORS
   App <$> Snap.nestSnaplet "socket.io" socketIO (SocketIO.init connectionHandler)
 
 
