@@ -1,7 +1,6 @@
 name:                snaplet-socketio
-version:             1.0.0
+version:             0.9.0
 synopsis:            Socket.io compatible Snaplet
--- description:         
 homepage:            http://github.com/ocharles/snaplet-socketio
 license:             BSD3
 license-file:        LICENSE
@@ -24,7 +23,7 @@ library
     attoparsec >= 0.10 && <0.11,
     base >=4.6 && <4.7,
     blaze-builder >= 0.3 && <0.4,
-    bytestring >= 0.10 && <0.11,    
+    bytestring >= 0.10 && <0.11,
     extensible-effects >= 1.2 && < 1.3,
     mtl >= 2.1 && <2.2,
     snap >=0.13 && <0.14,
