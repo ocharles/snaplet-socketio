@@ -115,12 +115,12 @@ decodeMessage = Attoparsec.maybeResult . Attoparsec.parse messageParser
 
 --------------------------------------------------------------------------------
 handShake :: Snap.Handler b SocketIO ()
-handShake = accessControl $ Snap.writeText "4d4f185e96a7b:15:10:websocket"
+handShake = Snap.writeText "4d4f185e96a7b:15:10:websocket"
 
 
 --------------------------------------------------------------------------------
 webSocketHandler :: Snap.Handler b SocketIO ()
-webSocketHandler = accessControl $ do
+webSocketHandler = do
   router <- asks eventRouter
   connectionHandler <- asks onConnection
 
@@ -144,14 +144,6 @@ webSocketHandler = accessControl $ do
             (return ())
             (\action -> Effect.runLift $ runEmitter c [] $ action args)
             (HashMap.lookup name router)
-
-
---------------------------------------------------------------------------------
-accessControl :: Snap.MonadSnap m => m a -> m a
-accessControl m = do
-  Snap.modifyResponse (Snap.setHeader "Access-Control-Allow-Origin" "http://localhost:3000")
-  Snap.modifyResponse (Snap.setHeader "Access-Control-Allow-Credentials" "true")
-  m
 
 
 --------------------------------------------------------------------------------
