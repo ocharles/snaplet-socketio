@@ -12,6 +12,7 @@ extra-source-files:  Changelog.md
 cabal-version:       >=1.10
 
 library
+  default-language: Haskell2010
   exposed-modules:     Snap.Snaplet.SocketIO
   other-extensions:
     DeriveDataTypeable
@@ -36,14 +37,14 @@ library
   hs-source-dirs:      src
   default-language:    Haskell2010
 
-executable snaplet-socketio-test
-  main-is: Example.hs
-  build-depends:
-    aeson >= 0.6 && <0.7,
-    base >= 4.6 && < 5,
-    extensible-effects >= 1.2 && < 1.3,
-    lens >= 3.10 && < 3.11,
-    snap >=0.13 && <0.14,
-    snap-server >= 0.9 && < 0.10,
-    snap-core >= 0.9 && < 0.10,
-    snaplet-socketio
+--executable snaplet-socketio-test
+--  main-is: Example.hs
+--  build-depends:
+--    aeson >= 0.6 && <0.7,
+--    base >= 4.6 && < 5,
+--    extensible-effects >= 1.2 && < 1.3,
+--    lens >= 3.10 && < 3.11,
+--    snap >=0.13 && <0.14,
+--    snap-server >= 0.9 && < 0.10,
+--    snap-core >= 0.9 && < 0.10,
+--    snaplet-socketio
