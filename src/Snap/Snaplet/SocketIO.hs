@@ -3,6 +3,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ViewPatterns #-}
 module Snap.Snaplet.SocketIO
   ( SocketIO
   , init
@@ -15,7 +16,8 @@ import Prelude hiding (init)
 
 import Blaze.ByteString.Builder (Builder, toLazyByteString)
 import Control.Applicative
-import Control.Concurrent (forkIO, threadDelay)                   
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar (putMVar, newEmptyMVar, takeMVar)
 import Control.Eff ((:>))
 import Control.Monad (forever, void)
 import Control.Monad.IO.Class (liftIO)
@@ -29,7 +31,9 @@ import Data.Monoid ((<>), mempty)
 import Data.Text (Text)
 import Data.Traversable (forM)
 import Data.Typeable (Typeable)
+import System.Timeout (timeout)
 
+import qualified Control.Concurrent.Async as Async
 import qualified Blaze.ByteString.Builder as Builder
 import qualified Blaze.ByteString.Builder.ByteString as Builder
 import qualified Blaze.ByteString.Builder.Char8 as Builder
@@ -146,26 +150,48 @@ webSocketHandler = do
 
     connectionHandler c []
 
-    forkIO $ forever $ do
-      -- TODO This should block until we receive an acknowledgement with a timeout
-      threadDelay (round (fromIntegral heartbeatPeriod / 2) * 1000000)
-      WS.sendTextData c . Builder.toLazyByteString $ encodeMessage Heartbeat
+    heartbeatAcknowledged <- newEmptyMVar
+
+    heartbeat <- Async.async $
+      let loop = do
+            WS.sendTextData c . Builder.toLazyByteString $ encodeMessage Heartbeat
+            heartbeatReceived <- timeout (heartbeatPeriod * 1000000) $
+              takeMVar heartbeatAcknowledged
+
+            case heartbeatReceived of
+              Just _ -> do
+                threadDelay (round $ (fromIntegral heartbeatPeriod * 1000000) / 2)
+                loop
+
+              Nothing -> error "Failed to receive a heartbeat. Terminating client"
+
+      in loop
 
     forever $ do
-      m <- WS.receiveDataMessage c
+      m <- WS.receive c
 
-      Just message <- return $ case m of
-        WS.Text encodedText -> decodeMessage encodedText
+      case m of
+        WS.ControlMessage (WS.Close _) -> do
+          Async.cancel heartbeat
+          error "Client closed connection"
 
-      case message of
-        -- TODO Acknowledge this
-        Heartbeat -> return ()
+        WS.ControlMessage (WS.Ping pl) ->
+          WS.send c (WS.ControlMessage (WS.Pong pl))
 
-        Event name args ->
-          maybe
-            (return ())
-            (\action -> Effect.runLift $ runEmitter c [] $ action args)
-            (HashMap.lookup name router)
+        WS.ControlMessage (WS.Pong _) ->
+          return ()
+
+        WS.DataMessage (WS.Text (decodeMessage -> Just message)) ->
+          case message of
+            Heartbeat -> putMVar heartbeatAcknowledged ()
+
+            Event name args ->
+              maybe
+                (return ())
+                (\action -> Effect.runLift $ runEmitter c [] $ action args)
+                (HashMap.lookup name router)
+
+        _ -> error $ "Unknown message: " ++ show m
 
 
 --------------------------------------------------------------------------------
