@@ -87,13 +87,13 @@ decodeMessage :: LBS.ByteString -> Maybe Message
 
 --------------------------------------------------------------------------------
 encodeMessage Connect =
-  Builder.fromString "1:::"
+  Builder.fromString "1::"
 
 encodeMessage Heartbeat =
-  Builder.fromString "2:::"
+  Builder.fromString "2::"
 
 encodeMessage (Event name args) =
-  let prefix = Builder.fromString "5::"
+  let prefix = Builder.fromString "5:::"
       event = Aeson.object [ "name" .= name
                            , "args" .= args
                            ]
@@ -105,7 +105,9 @@ encodeMessage (Event name args) =
 decodeMessage = Attoparsec.maybeResult . Attoparsec.parse messageParser
  where
   messageParser = asum
-    [ do Heartbeat <$ prefixParser 2
+    [ do Connect <$ prefixParser 1
+
+    , do Heartbeat <$ prefixParser 2
 
     , do let eventFromJson = Aeson.withObject "Event" $ \o ->
                Event <$> o .: "name" <*> o .: "args"
@@ -126,7 +128,7 @@ handShake :: Snap.Handler b SocketIO ()
 handShake = Snap.writeText $ Text.intercalate ":"
   [ "4d4f185e96a7b"
   , Text.pack $ show heartbeatPeriod
-  , "10"
+  , "60"
   , ":websocket"
   ]
 
@@ -140,15 +142,14 @@ webSocketHandler = do
   WS.runWebSocketsSnap $ \pendingConnection -> void $ do
     c <- WS.acceptRequest pendingConnection
 
-    --WS.sendTextData c . Builder.toLazyByteString $
-    --1  encodeMessage $ Connect
+    WS.sendTextData c . Builder.toLazyByteString $ encodeMessage $ Connect
 
     connectionHandler c []
 
     forkIO $ forever $ do
-      -- TODO This is dumb. We should heartbeat once and *wait*
+      -- TODO This should block until we receive an acknowledgement with a timeout
+      threadDelay (round (fromIntegral heartbeatPeriod / 2) * 1000000)
       WS.sendTextData c . Builder.toLazyByteString $ encodeMessage Heartbeat
-      threadDelay (heartbeatPeriod * 1000000)
 
     forever $ do
       m <- WS.receiveDataMessage c
@@ -246,4 +247,4 @@ buildRoutingTable = loop HashMap.empty . Effect.admin
 
 --------------------------------------------------------------------------------
 heartbeatPeriod :: Int
-heartbeatPeriod = 15
+heartbeatPeriod = 60
