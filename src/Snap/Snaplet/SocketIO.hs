@@ -129,12 +129,14 @@ decodeMessage = Attoparsec.maybeResult . Attoparsec.parse messageParser
 
 --------------------------------------------------------------------------------
 handShake :: Snap.Handler b SocketIO ()
-handShake = Snap.writeText $ Text.intercalate ":"
-  [ "4d4f185e96a7b"
-  , Text.pack $ show heartbeatPeriod
-  , "60"
-  , ":websocket"
-  ]
+handShake = do
+  Snap.modifyResponse (Snap.setContentType "text/plain")
+  Snap.writeText $ Text.intercalate ":"
+    [ "4d4f185e96a7b"
+    , Text.pack $ show heartbeatPeriod
+    , "60"
+    , "websocket"
+    ]
 
 
 --------------------------------------------------------------------------------
