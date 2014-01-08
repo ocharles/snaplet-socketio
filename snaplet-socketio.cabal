@@ -1,5 +1,5 @@
 name:                snaplet-socketio
-version:             0.10.0
+version:             0.11.0
 synopsis:            Socket.io compatible Snaplet
 homepage:            http://github.com/ocharles/snaplet-socketio
 license:             BSD3

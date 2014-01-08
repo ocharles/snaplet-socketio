@@ -10,6 +10,9 @@ module Snap.Snaplet.SocketIO
   , Listen
   , emit
   , on
+  , Message(..)
+  , encodeMessage
+  , decodeMessage
   ) where
 
 import Prelude hiding (init)
@@ -45,7 +48,8 @@ import qualified Data.Attoparsec.Char8 as AttoparsecC8
 import qualified Data.Attoparsec.Lazy as Attoparsec
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.HashMap.Strict as HashMap
-import qualified Data.Text as Text                                        
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
 import qualified Network.WebSockets as WS
 import qualified Network.WebSockets.Snap as WS
 import qualified Snap as Snap
@@ -86,23 +90,24 @@ data Message
   | Noop
   deriving (Show)
 
-encodeMessage :: Message -> Builder
+encodeMessage :: Message -> LBS.ByteString
 decodeMessage :: LBS.ByteString -> Maybe Message
 
 --------------------------------------------------------------------------------
-encodeMessage Connect =
-  Builder.fromString "1::"
+encodeMessage = Builder.toLazyByteString . go
+  where
+  go Connect =
+    Builder.fromString "1::"
 
-encodeMessage Heartbeat =
-  Builder.fromString "2::"
+  go Heartbeat =
+    Builder.fromString "2::"
 
-encodeMessage (Event name args) =
-  let prefix = Builder.fromString "5:::"
-      event = Aeson.object [ "name" .= name
-                           , "args" .= args
-                           ]
-  in prefix <> Builder.fromLazyByteString (Aeson.encode event)
-
+  go (Event name args) =
+    let prefix = Builder.fromString "5:::"
+        event = Aeson.object [ "name" .= name
+                             , "args" .= args
+                             ]
+    in prefix <> Builder.fromLazyByteString (Aeson.encode event)
 
 
 --------------------------------------------------------------------------------
@@ -148,7 +153,7 @@ webSocketHandler = do
   WS.runWebSocketsSnap $ \pendingConnection -> void $ do
     c <- WS.acceptRequest pendingConnection
 
-    WS.sendTextData c . Builder.toLazyByteString $ encodeMessage $ Connect
+    WS.sendTextData c $ encodeMessage $ Connect
 
     connectionHandler c []
 
@@ -156,7 +161,7 @@ webSocketHandler = do
 
     heartbeat <- Async.async $
       let loop = do
-            WS.sendTextData c . Builder.toLazyByteString $ encodeMessage Heartbeat
+            WS.sendTextData c $ encodeMessage Heartbeat
             heartbeatReceived <- timeout (heartbeatPeriod * 1000000) $
               takeMVar heartbeatAcknowledged
 
@@ -224,14 +229,14 @@ runEmitter c pool = loop . Effect.admin
   loop (Effect.E u) = Effect.handleRelay u loop $ \eff ->
     case eff of
       Emit event args k -> do
-        Effect.lift . WS.sendTextData c . Builder.toLazyByteString $
+        Effect.lift . WS.sendTextData c $
           encodeMessage $ Event event args
 
         loop k
 
       Broadcast event args k -> do
         forM pool $ \c' ->
-          Effect.lift . WS.sendTextData c' . Builder.toLazyByteString $
+          Effect.lift . WS.sendTextData c' $
             encodeMessage $ Event event args
 
         loop k
@@ -259,8 +264,16 @@ on
 on event f =
   let f' [x] = case Aeson.fromJSON x of
                  Aeson.Success v -> f v
-                 _ -> return () -- TODO We should probably do more here - exception?
-      f' _   = return () -- TODO We should probably do more here - exception?
+                 Aeson.Error r -> Effect.lift $ putStrLn $ concat
+                  [ Text.unpack event, " called with invalid argument: "
+                  , show $ Aeson.encode x -- TODO Decode this properly
+                  , " Reason: " ++ show r
+                  ]
+
+      f' args = Effect.lift $ putStrLn $ (Text.unpack event) ++ " was expected to be\
+                  \called with exactly one argument but was called with " ++
+                  show (length args)
+
   in Effect.send $ \k -> Effect.inj $ Listen event f' (k ())
 
 buildRoutingTable
