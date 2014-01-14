@@ -8,6 +8,7 @@ module Snap.Snaplet.SocketIO
   ( SocketIO
   , init
   , Listen
+  , Emit, Emitter
   , emit
   , on
   , Message(..)
@@ -88,7 +89,7 @@ data Message
   | Ack
   | Error
   | Noop
-  deriving (Show)
+  deriving (Eq, Show)
 
 encodeMessage :: Message -> LBS.ByteString
 decodeMessage :: LBS.ByteString -> Maybe Message
