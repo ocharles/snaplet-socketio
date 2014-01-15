@@ -5,16 +5,22 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
 module Snap.Snaplet.SocketIO
-  ( SocketIO
-  , init
-  , Listen
-  , Emit, Emitter
-  , emit
-  , on
+  ( -- * Socket.io Snaplet
+    SocketIO, init
+  , RoutingTable
+
+    -- * Socket.io Handlers
+  , EventHandler
+  , emit, on
+  , ConnectionId
+  , getConnectionId
+  , getOutputStream
+
+    -- * Socket.io Protoc
   , Message(..)
   , encodeMessage
   , decodeMessage
-  ) where
+) where
 
 import Prelude hiding (init)
 
@@ -23,9 +29,14 @@ import Control.Applicative
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (putMVar, newEmptyMVar, takeMVar)
 import Control.Eff ((:>))
-import Control.Monad (forever, void)
+import Control.Monad (forever, mzero, void)
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Reader (asks)
+import Control.Monad.Reader (MonadReader, ask, asks)
+import Control.Monad.State (MonadState, modify)
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
+import Control.Monad.Trans.Reader (ReaderT, runReaderT)
+import Control.Monad.Trans.State (State, execState)
 import Control.Monad.Trans.Writer (WriterT)
 import Data.Aeson ((.=), (.:))
 import Data.Char (intToDigit)
@@ -35,12 +46,13 @@ import Data.Monoid ((<>), mempty)
 import Data.Text (Text)
 import Data.Traversable (forM)
 import Data.Typeable (Typeable)
+import Data.Unique
 import System.Timeout (timeout)
 
-import qualified Control.Concurrent.Async as Async
 import qualified Blaze.ByteString.Builder as Builder
 import qualified Blaze.ByteString.Builder.ByteString as Builder
 import qualified Blaze.ByteString.Builder.Char8 as Builder
+import qualified Control.Concurrent.Async as Async
 import qualified Control.Eff as Effect
 import qualified Control.Eff.Lift as Effect
 import qualified Data.Aeson as Aeson
@@ -53,29 +65,23 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Network.WebSockets as WS
 import qualified Network.WebSockets.Snap as WS
+import qualified Pipes as Pipes
+import qualified Pipes.Concurrent as Pipes
 import qualified Snap as Snap
 import qualified Snap.Snaplet as Snap
 
+--------------------------------------------------------------------------------
+data SocketIO = SocketIO { socketIOInitialRoutingTable :: RoutingTable
+                         }
 
 --------------------------------------------------------------------------------
-data SocketIO = SocketIO
-  { eventRouter :: HashMap Text Subscriber
-  , onConnection :: WS.Connection -> [WS.Connection] -> IO ()
-  }
-
-
---------------------------------------------------------------------------------
-init :: Effect.Eff (Listen :> Emit :> Effect.Lift IO :> ()) () -> Snap.SnapletInit b SocketIO
-init router = Snap.makeSnaplet "socketio" "SocketIO" Nothing $ do
+init :: State RoutingTable a -> Snap.SnapletInit b SocketIO
+init mkRoutingTable = Snap.makeSnaplet "socketio" "SocketIO" Nothing $ do
   Snap.addRoutes [ ("/:version", handShake)
                  , ("/:version/websocket/:session", webSocketHandler)
                  ]
 
-  let subscribed = buildRoutingTable router
-
-  SocketIO
-    <$> liftIO (Effect.runLift (noopEmit subscribed))
-    <*> pure (\c cs -> Effect.runLift (runEmitter c cs (void subscribed)))
+  return $ SocketIO (execState mkRoutingTable (RoutingTable HashMap.empty))
 
 
 --------------------------------------------------------------------------------
@@ -148,18 +154,14 @@ handShake = do
 --------------------------------------------------------------------------------
 webSocketHandler :: Snap.Handler b SocketIO ()
 webSocketHandler = do
-  router <- asks eventRouter
-  connectionHandler <- asks onConnection
+  initialRoutingTable <- asks socketIOInitialRoutingTable
 
   WS.runWebSocketsSnap $ \pendingConnection -> void $ do
     c <- WS.acceptRequest pendingConnection
 
     WS.sendTextData c $ encodeMessage $ Connect
 
-    connectionHandler c []
-
     heartbeatAcknowledged <- newEmptyMVar
-
     heartbeat <- Async.async $
       let loop = do
             WS.sendTextData c $ encodeMessage Heartbeat
@@ -175,117 +177,91 @@ webSocketHandler = do
 
       in loop
 
-    forever $ do
-      m <- WS.receive c
+    connectionId <- newUnique
+    (output, input) <- Pipes.spawn Pipes.Unbounded
 
-      case m of
-        WS.ControlMessage (WS.Close _) -> do
-          Async.cancel heartbeat
-          error "Client closed connection"
+    let connection = Connection output connectionId
 
-        WS.ControlMessage (WS.Ping pl) ->
-          WS.send c (WS.ControlMessage (WS.Pong pl))
+    _ <- Async.async $ do
+      Pipes.runEffect $ Pipes.for (Pipes.fromInput input) $
+        liftIO . WS.sendTextData c . encodeMessage
 
-        WS.ControlMessage (WS.Pong _) ->
-          return ()
+    let loop tbl@(RoutingTable routingTable) = do
+          m <- WS.receive c
+          case m of
+            WS.ControlMessage (WS.Close _) -> do
+              Async.cancel heartbeat
+              error "Client closed connection"
 
-        WS.DataMessage (WS.Text (decodeMessage -> Just message)) ->
-          case message of
-            Heartbeat -> putMVar heartbeatAcknowledged ()
+            WS.ControlMessage (WS.Ping pl) -> do
+              WS.send c (WS.ControlMessage (WS.Pong pl))
+              loop tbl
 
-            Event name args ->
-              maybe
-                (return ())
-                (\action -> Effect.runLift $ runEmitter c [] $ action args)
-                (HashMap.lookup name router)
+            WS.ControlMessage (WS.Pong _) ->
+              loop tbl
 
-        _ -> error $ "Unknown message: " ++ show m
+            WS.DataMessage (WS.Text (decodeMessage -> Just message)) ->
+              case message of
+                Heartbeat -> do
+                  putMVar heartbeatAcknowledged ()
+                  loop tbl
 
+                Event name args -> do
+                  maybe
+                    (return ())
+                    (\action -> void $ runReaderT (runMaybeT (action args)) connection)
+                    (HashMap.lookup name routingTable)
 
---------------------------------------------------------------------------------
-data Emit k = Emit Text [Aeson.Value] k
-            | Broadcast Text [Aeson.Value] k
-  deriving (Functor, Typeable)
+                  loop tbl
 
-emit :: (Effect.Member Emit r, Aeson.ToJSON a) => Text -> a -> Effect.Eff r ()
-emit event value = emitValues event [ Aeson.toJSON value ]
+            _ -> error $ "Unknown message: " ++ show m
 
-emitValues :: (Effect.Member Emit r) => Text -> [Aeson.Value] -> Effect.Eff r ()
-emitValues event values =
-  Effect.send $ \k -> Effect.inj $ Emit event values (k ())
-
-broadcast :: (Effect.Member Emit r, Aeson.ToJSON a) => Text -> a -> Effect.Eff r ()
-broadcast event value = broadcastValues event [ Aeson.toJSON value ]
-
-broadcastValues :: (Effect.Member Emit r) => Text -> [Aeson.Value] -> Effect.Eff r ()
-broadcastValues event values =
-  Effect.send $ \k -> Effect.inj $ Broadcast event values (k ())
-
-runEmitter
-  :: Effect.SetMember Effect.Lift (Effect.Lift IO) r
-  => WS.Connection -> [WS.Connection] -> Effect.Eff (Emit :> r) a -> Effect.Eff r a
-runEmitter c pool = loop . Effect.admin
- where
-  loop (Effect.Val x) = return x
-  loop (Effect.E u) = Effect.handleRelay u loop $ \eff ->
-    case eff of
-      Emit event args k -> do
-        Effect.lift . WS.sendTextData c $
-          encodeMessage $ Event event args
-
-        loop k
-
-      Broadcast event args k -> do
-        forM pool $ \c' ->
-          Effect.lift . WS.sendTextData c' $
-            encodeMessage $ Event event args
-
-        loop k
-
-
-noopEmit :: Effect.Eff (Emit :> r) a -> Effect.Eff r a
-noopEmit = loop . Effect.admin
- where
-  loop (Effect.Val x) = return x
-  loop (Effect.E u) = Effect.handleRelay u loop $
-    \(Emit event args k) -> loop k
-
+    loop initialRoutingTable
 
 --------------------------------------------------------------------------------
-type Emitter = Effect.Eff (Emit :> Effect.Lift IO :> ()) ()
+newtype RoutingTable =
+  RoutingTable (HashMap.HashMap Text ([Aeson.Value] -> MaybeT EventHandler ()))
 
-type Subscriber = [Aeson.Value] -> Emitter
-
-data Listen k = Listen Text Subscriber k
-  deriving (Functor, Typeable)
-
+--------------------------------------------------------------------------------
 on
-  :: Aeson.FromJSON a
-  => Effect.Member Listen r => Text -> (a -> Emitter) -> Effect.Eff r ()
-on event f =
-  let f' [x] = case Aeson.fromJSON x of
-                 Aeson.Success v -> f v
-                 Aeson.Error r -> Effect.lift $ putStrLn $ concat
-                  [ Text.unpack event, " called with invalid argument: "
-                  , show $ Aeson.encode x -- TODO Decode this properly
-                  , " Reason: " ++ show r
-                  ]
+  :: MonadState RoutingTable m
+  => Aeson.FromJSON a => Text -> (a -> EventHandler ()) -> m ()
+on eventName handler =
+  let eventHandler [x] =
+        case Aeson.fromJSON x of
+          Aeson.Success v -> lift (handler v)
+          Aeson.Error r -> mzero
+      eventHandler _ = mzero
 
-      f' args = Effect.lift $ putStrLn $ (Text.unpack event) ++ " was expected to be\
-                  \called with exactly one argument but was called with " ++
-                  show (length args)
+  in modify $ \(RoutingTable routes) -> RoutingTable $
+      HashMap.insertWith (\new old json -> old json <|> new json)
+                         eventName eventHandler routes
 
-  in Effect.send $ \k -> Effect.inj $ Listen event f' (k ())
+--------------------------------------------------------------------------------
+type ConnectionId = Unique
 
+data Connection = Connection { connectionOutputStream :: Pipes.Output Message
+                              , connectionId :: ConnectionId
+                              }
+
+type EventHandler = ReaderT Connection IO
+
+emit :: Aeson.ToJSON a => Text -> a -> EventHandler ()
+emit evtName payload = do
+  connection <- getOutputStream
+  void $ liftIO $ Pipes.atomically $
+    Pipes.send connection (Event evtName [ Aeson.toJSON payload ])
+
+getOutputStream :: MonadReader Connection m => m (Pipes.Output Message)
+getOutputStream = asks connectionOutputStream
+
+getConnectionId :: MonadReader Connection m => m ConnectionId
+getConnectionId = asks connectionId
+
+--------------------------------------------------------------------------------
 buildRoutingTable
-  :: Effect.Eff (Listen :> r) a -> Effect.Eff r (HashMap Text Subscriber)
-buildRoutingTable = loop HashMap.empty . Effect.admin
- where
-  loop t (Effect.Val _) = return t
-  loop t (Effect.E u) = Effect.handleRelay u (loop t) $
-    \(Listen event subscriber k) ->
-      loop (HashMap.insert event subscriber t) k
-
+  :: State RoutingTable a -> RoutingTable
+buildRoutingTable = flip execState (RoutingTable HashMap.empty)
 
 --------------------------------------------------------------------------------
 heartbeatPeriod :: Int

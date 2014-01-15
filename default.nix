@@ -1,12 +1,13 @@
-{}:
-with import <nixpkgs> {};
+{ haskellPackages ? (import <nixpkgs> {}).haskellPackages }:
 let
-  inherit (haskellPackages) blazeBuilder cabal cabalInstall_1_18_0_2 extensibleEffects snap websocketsSnap ;
+  pkgs = import <nixpkgs> {};
+
+  inherit (haskellPackages) async blazeBuilder cabal cabalInstall_1_18_0_2 extensibleEffects snap websocketsSnap pipes pipesConcurrency;
 
 in cabal.mkDerivation (self: {
   pname = "snaplet-socketio";
   version = "1.0.0";
   src = ./.;
-  buildDepends = [ blazeBuilder extensibleEffects snap websocketsSnap ];
-  buildTools = [ cabalInstall_1_18_0_2 nodejs ];
+  buildDepends = [ async blazeBuilder extensibleEffects snap websocketsSnap pipes pipesConcurrency ];
+  buildTools = [ cabalInstall_1_18_0_2 pkgs.nodejs ];
 })
