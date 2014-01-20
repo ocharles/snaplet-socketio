@@ -6,12 +6,13 @@
 {-# LANGUAGE ViewPatterns #-}
 module Snap.Snaplet.SocketIO
   ( -- * Socket.io Snaplet
-    SocketIO, init
+    SocketIO
+  , init
   , RoutingTable
 
     -- * Socket.io Handlers
   , EventHandler
-  , emit, on
+  , emit, on, on_
   , ConnectionId
   , getConnectionId
   , getOutputStream
@@ -236,6 +237,12 @@ on eventName handler =
   in modify $ \(RoutingTable routes) -> RoutingTable $
       HashMap.insertWith (\new old json -> old json <|> new json)
                          eventName eventHandler routes
+
+--------------------------------------------------------------------------------
+on_ :: MonadState RoutingTable m => Text -> EventHandler () -> m ()
+on_ eventName handler = modify $ \(RoutingTable routes) -> RoutingTable $
+  HashMap.insertWith (\new old json -> old json <|> new json)
+                     eventName (\_ -> lift handler) routes
 
 --------------------------------------------------------------------------------
 type ConnectionId = Unique
