@@ -92,7 +92,7 @@ data Message
   | Heartbeat
   | Message
   | JSON
-  | Event Text [Aeson.Value]
+  | Event { eventName :: Text, eventPayload :: [Aeson.Value] }
   | Ack
   | Error
   | Noop
