@@ -72,17 +72,17 @@ import qualified Snap as Snap
 import qualified Snap.Snaplet as Snap
 
 --------------------------------------------------------------------------------
-data SocketIO = SocketIO { socketIOInitialRoutingTable :: RoutingTable
-                         }
+data SocketIO = SocketIO
+
 
 --------------------------------------------------------------------------------
-init :: State RoutingTable a -> Snap.SnapletInit b SocketIO
-init mkRoutingTable = Snap.makeSnaplet "socketio" "SocketIO" Nothing $ do
-  Snap.addRoutes [ ("/:version", handShake)
-                 , ("/:version/websocket/:session", webSocketHandler)
-                 ]
+init socketIOHandler =
+  Snap.makeSnaplet "socketio" "SocketIO" Nothing $ do
+    Snap.addRoutes [ ("/:version", handShake)
+                   , ("/:version/websocket/:session",  Snap.withTop' id $ wrapSocketIOHandler socketIOHandler)
+                   ]
 
-  return $ SocketIO (execState mkRoutingTable (RoutingTable HashMap.empty))
+    return SocketIO
 
 
 --------------------------------------------------------------------------------
@@ -151,11 +151,9 @@ handShake = do
     , "websocket"
     ]
 
-
 --------------------------------------------------------------------------------
-webSocketHandler :: Snap.Handler b SocketIO ()
-webSocketHandler = do
-  initialRoutingTable <- asks socketIOInitialRoutingTable
+wrapSocketIOHandler h = do
+  initialRoutingTable <- buildRoutingTable <$> h
 
   WS.runWebSocketsSnap $ \pendingConnection -> void $ do
     c <- WS.acceptRequest pendingConnection
