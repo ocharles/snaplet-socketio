@@ -13,6 +13,7 @@ module Snap.Snaplet.SocketIO
     -- * Socket.io Handlers
   , EventHandler
   , emit, on, on_
+  , Connection
   , ConnectionId
   , getConnectionId
   , getOutputStream
