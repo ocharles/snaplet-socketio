@@ -17,6 +17,7 @@ module Snap.Snaplet.SocketIO
   , ConnectionId
   , getConnectionId
   , getOutputStream
+  , onDisconnect
 
     -- * Socket.io Protoc
   , Message(..)
@@ -30,7 +31,7 @@ import Blaze.ByteString.Builder (Builder, toLazyByteString)
 import Control.Applicative
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (putMVar, newEmptyMVar, takeMVar)
-import Control.Eff ((:>))
+import Control.Exception (finally)
 import Control.Monad (forever, mzero, void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (MonadReader, ask, asks)
@@ -40,7 +41,7 @@ import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.Trans.Reader (ReaderT, runReaderT)
 import Control.Monad.Trans.State (State, execState)
 import Control.Monad.Trans.Writer (WriterT)
-import Data.Aeson ((.=), (.:))
+import Data.Aeson ((.=), (.:), (.:?), (.!=))
 import Data.Char (intToDigit)
 import Data.Foldable (asum)
 import Data.HashMap.Strict (HashMap)
@@ -55,6 +56,7 @@ import qualified Blaze.ByteString.Builder as Builder
 import qualified Blaze.ByteString.Builder.ByteString as Builder
 import qualified Blaze.ByteString.Builder.Char8 as Builder
 import qualified Control.Concurrent.Async as Async
+import qualified Control.Concurrent.STM as STM
 import qualified Control.Eff as Effect
 import qualified Control.Eff.Lift as Effect
 import qualified Data.Aeson as Aeson
@@ -105,6 +107,9 @@ decodeMessage :: LBS.ByteString -> Maybe Message
 --------------------------------------------------------------------------------
 encodeMessage = Builder.toLazyByteString . go
   where
+  go Disconnect =
+    Builder.fromString "0::"
+
   go Connect =
     Builder.fromString "1::"
 
@@ -123,12 +128,14 @@ encodeMessage = Builder.toLazyByteString . go
 decodeMessage = Attoparsec.maybeResult . Attoparsec.parse messageParser
  where
   messageParser = asum
-    [ do Connect <$ prefixParser 1
+    [ do Disconnect <$ prefixParser 0
+
+    , do Connect <$ prefixParser 1
 
     , do Heartbeat <$ prefixParser 2
 
     , do let eventFromJson = Aeson.withObject "Event" $ \o ->
-               Event <$> o .: "name" <*> o .: "args"
+               Event <$> o .: "name" <*> (o .:? "args" .!= mempty)
          Just event <- Aeson.parseMaybe eventFromJson
                          <$> (prefixParser 5 >> AttoparsecC8.char ':' >> Aeson.json)
          return event
@@ -178,20 +185,20 @@ wrapSocketIOHandler h = do
       in loop
 
     connectionId <- newUnique
-    (output, input) <- Pipes.spawn Pipes.Unbounded
+    (output, input, seal) <- Pipes.spawn' Pipes.Unbounded
 
     let connection = Connection output connectionId
 
-    _ <- Async.async $ do
+    reader <- Async.async $ do
       Pipes.runEffect $ Pipes.for (Pipes.fromInput input) $
         liftIO . WS.sendTextData c . encodeMessage
 
-    let loop tbl@(RoutingTable routingTable) = do
+    let loop tbl@(RoutingTable routingTable _) = do
           m <- WS.receive c
           case m of
             WS.ControlMessage (WS.Close _) -> do
-              Async.cancel heartbeat
-              error "Client closed connection"
+              liftIO (putStrLn "Client closed connection")
+              return tbl
 
             WS.ControlMessage (WS.Ping pl) -> do
               WS.send c (WS.ControlMessage (WS.Pong pl))
@@ -202,6 +209,8 @@ wrapSocketIOHandler h = do
 
             WS.DataMessage (WS.Text (decodeMessage -> Just message)) ->
               case message of
+                Disconnect -> return tbl
+
                 Heartbeat -> do
                   putMVar heartbeatAcknowledged ()
                   loop tbl
@@ -216,11 +225,19 @@ wrapSocketIOHandler h = do
 
             _ -> error $ "Unknown message: " ++ show m
 
-    loop initialRoutingTable
+    let cleanup = do
+          Async.cancel reader
+          Async.cancel heartbeat
+          STM.atomically seal
+
+    (RoutingTable _ disconnectHandler) <- loop initialRoutingTable `finally` cleanup
+    disconnectHandler connectionId
 
 --------------------------------------------------------------------------------
-newtype RoutingTable =
-  RoutingTable (HashMap.HashMap Text ([Aeson.Value] -> MaybeT EventHandler ()))
+data RoutingTable = RoutingTable
+  { routingTableEvents :: HashMap.HashMap Text ([Aeson.Value] -> MaybeT EventHandler ())
+  , routingTableDisconnect :: ConnectionId -> IO ()
+  }
 
 --------------------------------------------------------------------------------
 on
@@ -233,22 +250,38 @@ on eventName handler =
           Aeson.Error r -> mzero
       eventHandler _ = mzero
 
-  in modify $ \(RoutingTable routes) -> RoutingTable $
-      HashMap.insertWith (\new old json -> old json <|> new json)
-                         eventName eventHandler routes
+  in modify $ \rt -> rt
+       { routingTableEvents =
+           HashMap.insertWith (\new old json -> old json <|> new json)
+                              eventName
+                              eventHandler
+                              (routingTableEvents rt)
+       }
+
+
+--------------------------------------------------------------------------------
+onDisconnect
+  :: MonadState RoutingTable m => (ConnectionId -> IO ()) -> m ()
+onDisconnect handler = modify $ \rt -> rt
+  { routingTableDisconnect = handler }
 
 --------------------------------------------------------------------------------
 on_ :: MonadState RoutingTable m => Text -> EventHandler () -> m ()
-on_ eventName handler = modify $ \(RoutingTable routes) -> RoutingTable $
-  HashMap.insertWith (\new old json -> old json <|> new json)
-                     eventName (\_ -> lift handler) routes
+on_ eventName handler = modify $ \rt -> rt
+  { routingTableEvents =
+      HashMap.insertWith (\new old json -> old json <|> new json)
+                         eventName
+                         (\_ -> lift handler)
+                         (routingTableEvents rt)
+  }
+
 
 --------------------------------------------------------------------------------
 type ConnectionId = Unique
 
 data Connection = Connection { connectionOutputStream :: Pipes.Output Message
-                              , connectionId :: ConnectionId
-                              }
+                             , connectionId :: ConnectionId
+                             }
 
 type EventHandler = ReaderT Connection IO
 
@@ -267,7 +300,7 @@ getConnectionId = asks connectionId
 --------------------------------------------------------------------------------
 buildRoutingTable
   :: State RoutingTable a -> RoutingTable
-buildRoutingTable = flip execState (RoutingTable HashMap.empty)
+buildRoutingTable = flip execState (RoutingTable HashMap.empty (const (return ())))
 
 --------------------------------------------------------------------------------
 heartbeatPeriod :: Int
