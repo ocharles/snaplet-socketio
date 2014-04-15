@@ -18,8 +18,10 @@ module Snap.Snaplet.SocketIO
   , getConnectionId
   , getOutputStream
   , onDisconnect
+  , getConnection
+  , connectionOutputStream
 
-    -- * Socket.io Protoc
+    -- * Socket.io Protocol
   , Message(..)
   , encodeMessage
   , decodeMessage
@@ -31,7 +33,7 @@ import Blaze.ByteString.Builder (Builder, toLazyByteString)
 import Control.Applicative
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (putMVar, newEmptyMVar, takeMVar)
-import Control.Exception (finally)
+import Control.Exception (SomeException(..), throwIO, try)
 import Control.Monad (forever, mzero, void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (MonadReader, ask, asks)
@@ -64,6 +66,7 @@ import qualified Data.Aeson.Types as Aeson
 import qualified Data.Attoparsec.Char8 as AttoparsecC8
 import qualified Data.Attoparsec.Lazy as Attoparsec
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Function as Function
 import qualified Data.HashMap.Strict as HashMap
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -230,13 +233,19 @@ wrapSocketIOHandler h = do
           Async.cancel heartbeat
           STM.atomically seal
 
-    (RoutingTable _ disconnectHandler) <- loop initialRoutingTable `finally` cleanup
-    disconnectHandler connectionId
+    res <- try (loop initialRoutingTable)
+    case res of
+      Left (SomeException e) -> do
+        routingTableDisconnect initialRoutingTable connection
+        throwIO e
+
+      Right rt -> do
+        routingTableDisconnect rt connection
 
 --------------------------------------------------------------------------------
 data RoutingTable = RoutingTable
   { routingTableEvents :: HashMap.HashMap Text ([Aeson.Value] -> MaybeT EventHandler ())
-  , routingTableDisconnect :: ConnectionId -> IO ()
+  , routingTableDisconnect :: Connection -> IO ()
   }
 
 --------------------------------------------------------------------------------
@@ -261,7 +270,7 @@ on eventName handler =
 
 --------------------------------------------------------------------------------
 onDisconnect
-  :: MonadState RoutingTable m => (ConnectionId -> IO ()) -> m ()
+  :: MonadState RoutingTable m => (Connection -> IO ()) -> m ()
 onDisconnect handler = modify $ \rt -> rt
   { routingTableDisconnect = handler }
 
@@ -283,6 +292,12 @@ data Connection = Connection { connectionOutputStream :: Pipes.Output Message
                              , connectionId :: ConnectionId
                              }
 
+instance Eq Connection where
+  (==) = ((==) `Function.on` connectionId)
+
+instance Ord Connection where
+  compare = compare `Function.on` connectionId
+
 type EventHandler = ReaderT Connection IO
 
 emit :: Aeson.ToJSON a => Text -> a -> EventHandler ()
@@ -290,6 +305,9 @@ emit evtName payload = do
   connection <- getOutputStream
   void $ liftIO $ Pipes.atomically $
     Pipes.send connection (Event evtName [ Aeson.toJSON payload ])
+
+getConnection :: MonadReader Connection m => m Connection
+getConnection = ask
 
 getOutputStream :: MonadReader Connection m => m (Pipes.Output Message)
 getOutputStream = asks connectionOutputStream
