@@ -272,7 +272,9 @@ on eventName handler =
 appendDisconnectHandler
   :: MonadState RoutingTable m => (Connection -> IO ()) -> m ()
 appendDisconnectHandler handler = modify $ \rt -> rt
-  { routingTableDisconnect = routingTableDisconnect rt >> handler }
+  { routingTableDisconnect = \conn -> do routingTableDisconnect rt conn
+                                         handler conn
+  }
 
 --------------------------------------------------------------------------------
 on_ :: MonadState RoutingTable m => Text -> EventHandler () -> m ()
