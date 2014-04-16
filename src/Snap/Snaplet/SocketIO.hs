@@ -33,7 +33,7 @@ import Blaze.ByteString.Builder (Builder, toLazyByteString)
 import Control.Applicative
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (putMVar, newEmptyMVar, takeMVar)
-import Control.Exception (SomeException(..), throwIO, try)
+import Control.Exception (SomeException(..), finally, throwIO, try)
 import Control.Monad (forever, mzero, void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (MonadReader, ask, asks)
@@ -233,7 +233,7 @@ wrapSocketIOHandler h = do
           Async.cancel heartbeat
           STM.atomically seal
 
-    res <- try (loop initialRoutingTable)
+    res <- try (loop initialRoutingTable `finally` cleanup)
     case res of
       Left (SomeException e) -> do
         routingTableDisconnect initialRoutingTable connection
