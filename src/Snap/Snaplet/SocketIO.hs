@@ -45,7 +45,7 @@ import Control.Monad.Trans.State (State, execState)
 import Control.Monad.Trans.Writer (WriterT)
 import Data.Aeson ((.=), (.:), (.:?), (.!=))
 import Data.Char (intToDigit)
-import Data.Foldable (asum)
+import Data.Foldable (asum, for_)
 import Data.HashMap.Strict (HashMap)
 import Data.Monoid ((<>), mempty)
 import Data.Text (Text)
@@ -219,10 +219,10 @@ wrapSocketIOHandler h = do
                   loop tbl
 
                 Event name args -> do
-                  maybe
-                    (return ())
-                    (\action -> void $ runReaderT (runMaybeT (action args)) connection)
-                    (HashMap.lookup name routingTable)
+                  for_ (HashMap.lookup name routingTable) $ \action ->
+                    Async.withAsync
+                      (runReaderT (runMaybeT (action args)) connection)
+                      Async.waitCatch
 
                   loop tbl
 
