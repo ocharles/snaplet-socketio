@@ -17,7 +17,7 @@ module Snap.Snaplet.SocketIO
   , ConnectionId
   , getConnectionId
   , getOutputStream
-  , onDisconnect
+  , appendDisconnectHandler
   , getConnection
   , connectionOutputStream
 
@@ -269,10 +269,10 @@ on eventName handler =
 
 
 --------------------------------------------------------------------------------
-onDisconnect
+appendDisconnectHandler
   :: MonadState RoutingTable m => (Connection -> IO ()) -> m ()
-onDisconnect handler = modify $ \rt -> rt
-  { routingTableDisconnect = handler }
+appendDisconnectHandler handler = modify $ \rt -> rt
+  { routingTableDisconnect = routingTableDisconnect rt >> handler }
 
 --------------------------------------------------------------------------------
 on_ :: MonadState RoutingTable m => Text -> EventHandler () -> m ()
