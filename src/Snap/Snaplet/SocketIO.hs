@@ -59,8 +59,6 @@ import qualified Blaze.ByteString.Builder.ByteString as Builder
 import qualified Blaze.ByteString.Builder.Char8 as Builder
 import qualified Control.Concurrent.Async as Async
 import qualified Control.Concurrent.STM as STM
-import qualified Control.Eff as Effect
-import qualified Control.Eff.Lift as Effect
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types as Aeson
 import qualified Data.Attoparsec.Char8 as AttoparsecC8
